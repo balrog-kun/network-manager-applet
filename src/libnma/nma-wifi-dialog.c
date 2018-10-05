@@ -838,6 +838,30 @@ out:
 }
 
 static gboolean
+security_valid (NMUtilsSecurityType sectype,
+                NM80211Mode mode,
+                NMDeviceWifiCapabilities wifi_caps,
+                gboolean have_ap,
+                NM80211ApFlags ap_flags,
+                NM80211ApSecurityFlags ap_wpa,
+                NM80211ApSecurityFlags ap_rsn)
+{
+	switch (mode) {
+	case NM_802_11_MODE_AP:
+		return nm_utils_ap_mode_security_valid (sectype, wifi_caps);
+	case NM_802_11_MODE_ADHOC:
+	case NM_802_11_MODE_INFRA:
+	default:
+		return nm_utils_security_valid (sectype,
+		                                wifi_caps,
+		                                have_ap,
+		                                (mode == NM_802_11_MODE_ADHOC),
+		                                ap_flags, ap_wpa, ap_rsn);
+	}
+	g_assert_not_reached ();
+}
+
+static gboolean
 security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
                      const char *secrets_setting_name, const char *const*secrets_hints)
 {
@@ -854,7 +878,7 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 	int active = -1;
 	int item = 0;
 	NMSettingWireless *s_wireless = NULL;
-	gboolean is_adhoc;
+	NM80211Mode mode;
 	const char *setting_name;
 
 	g_return_val_if_fail (self != NULL, FALSE);
@@ -863,7 +887,7 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 	g_return_val_if_fail (priv->device != NULL, FALSE);
 	g_return_val_if_fail (priv->sec_combo != NULL, FALSE);
 
-	is_adhoc = (priv->operation == OP_CREATE_ADHOC);
+	mode = (priv->operation == OP_CREATE_ADHOC) ? NM_802_11_MODE_ADHOC : NM_802_11_MODE_INFRA;
 
 	/* The security options displayed are filtered based on device
 	 * capabilities, and if provided, additionally by access point capabilities.
@@ -879,13 +903,17 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 	}
 
 	if (priv->connection) {
-		const char *mode;
+		const char *mode_str;
 
 		s_wireless = nm_connection_get_setting_wireless (priv->connection);
 
-		mode = nm_setting_wireless_get_mode (s_wireless);
-		if (mode && (!strcmp (mode, "adhoc") || !strcmp (mode, "ap")))
-			is_adhoc = TRUE;
+		mode_str = nm_setting_wireless_get_mode (s_wireless);
+		if (mode_str && !strcmp (mode_str, "adhoc"))
+			mode = NM_802_11_MODE_ADHOC;
+		else if (mode_str && !strcmp (mode_str, "ap"))
+			mode = NM_802_11_MODE_AP;
+		else
+			mode = NM_802_11_MODE_INFRA;
 
 		wsec = nm_connection_get_setting_wireless_security (priv->connection);
 
@@ -896,14 +924,14 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 			if (wep_type == NM_WEP_KEY_TYPE_UNKNOWN)
 				wep_type = NM_WEP_KEY_TYPE_KEY;
 		}
-	} else if (is_adhoc) {
+	} else if (mode == NM_802_11_MODE_ADHOC) {
 		default_type = NMU_SEC_STATIC_WEP;
 		wep_type = NM_WEP_KEY_TYPE_PASSPHRASE;
 	}
 
 	sec_model = gtk_list_store_new (2, G_TYPE_STRING, WIRELESS_TYPE_SECURITY);
 
-	if (nm_utils_security_valid (NMU_SEC_NONE, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)) {
+	if (security_valid (NMU_SEC_NONE, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)) {
 		gtk_list_store_append (sec_model, &iter);
 		gtk_list_store_set (sec_model, &iter,
 		                    S_NAME_COLUMN, C_("Wifi/wired security", "None"),
@@ -916,11 +944,11 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 	/* Don't show Static WEP if both the AP and the device are capable of WPA,
 	 * even though technically it's possible to have this configuration.
 	 */
-	if (   nm_utils_security_valid (NMU_SEC_STATIC_WEP, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)
+	if (   security_valid (NMU_SEC_STATIC_WEP, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)
 	    && ((!ap_wpa && !ap_rsn) || !(dev_caps & (NM_WIFI_DEVICE_CAP_WPA | NM_WIFI_DEVICE_CAP_RSN)))) {
 		WirelessSecurityWEPKey *ws_wep;
 
-		ws_wep = ws_wep_key_new (priv->connection, NM_WEP_KEY_TYPE_KEY, is_adhoc, secrets_only);
+		ws_wep = ws_wep_key_new (priv->connection, NM_WEP_KEY_TYPE_KEY, mode == NM_802_11_MODE_ADHOC, secrets_only);
 		if (ws_wep) {
 			add_security_item (self, WIRELESS_SECURITY (ws_wep), sec_model,
 			                   &iter, _("WEP 40/128-bit Key (Hex or ASCII)"));
@@ -929,7 +957,7 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 			item++;
 		}
 
-		ws_wep = ws_wep_key_new (priv->connection, NM_WEP_KEY_TYPE_PASSPHRASE, is_adhoc, secrets_only);
+		ws_wep = ws_wep_key_new (priv->connection, NM_WEP_KEY_TYPE_PASSPHRASE, mode == NM_802_11_MODE_ADHOC, secrets_only);
 		if (ws_wep) {
 			add_security_item (self, WIRELESS_SECURITY (ws_wep), sec_model,
 			                   &iter, _("WEP 128-bit Passphrase"));
@@ -942,7 +970,7 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 	/* Don't show LEAP if both the AP and the device are capable of WPA,
 	 * even though technically it's possible to have this configuration.
 	 */
-	if (   nm_utils_security_valid (NMU_SEC_LEAP, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)
+	if (   security_valid (NMU_SEC_LEAP, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)
 	    && ((!ap_wpa && !ap_rsn) || !(dev_caps & (NM_WIFI_DEVICE_CAP_WPA | NM_WIFI_DEVICE_CAP_RSN)))) {
 		WirelessSecurityLEAP *ws_leap;
 
@@ -956,7 +984,7 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 		}
 	}
 
-	if (nm_utils_security_valid (NMU_SEC_DYNAMIC_WEP, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)) {
+	if (security_valid (NMU_SEC_DYNAMIC_WEP, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)) {
 		WirelessSecurityDynamicWEP *ws_dynamic_wep;
 
 		ws_dynamic_wep = ws_dynamic_wep_new (priv->connection, FALSE, secrets_only);
@@ -969,8 +997,8 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 		}
 	}
 
-	if (   nm_utils_security_valid (NMU_SEC_WPA_PSK, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)
-	    || nm_utils_security_valid (NMU_SEC_WPA2_PSK, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)) {
+	if (   security_valid (NMU_SEC_WPA_PSK, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)
+	    || security_valid (NMU_SEC_WPA2_PSK, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)) {
 		WirelessSecurityWPAPSK *ws_wpa_psk;
 
 		ws_wpa_psk = ws_wpa_psk_new (priv->connection, secrets_only);
@@ -983,8 +1011,8 @@ security_combo_init (NMAWifiDialog *self, gboolean secrets_only,
 		}
 	}
 
-	if (   nm_utils_security_valid (NMU_SEC_WPA_ENTERPRISE, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)
-	    || nm_utils_security_valid (NMU_SEC_WPA2_ENTERPRISE, dev_caps, !!priv->ap, is_adhoc, ap_flags, ap_wpa, ap_rsn)) {
+	if (   security_valid (NMU_SEC_WPA_ENTERPRISE, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)
+	    || security_valid (NMU_SEC_WPA2_ENTERPRISE, mode, dev_caps, !!priv->ap, ap_flags, ap_wpa, ap_rsn)) {
 		WirelessSecurityWPAEAP *ws_wpa_eap;
 		const char *const*hints = NULL;
 
