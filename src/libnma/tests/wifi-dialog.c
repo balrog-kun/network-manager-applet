@@ -17,7 +17,38 @@
  */
 
 #include <gtk/gtk.h>
+#include <NetworkManager.h>
 #include "nma-wifi-dialog.h"
+
+static void
+response_cb (GtkDialog *obj, gint response, gpointer user_data)
+{
+	NMAWifiDialog *dialog = NMA_WIFI_DIALOG (obj);
+
+	g_print ("response %i\n", response);
+
+	if (response == GTK_RESPONSE_OK) {
+		GHashTable *diff = NULL, *setting_diff;
+		GHashTableIter iter, setting_iter;
+		const char *setting, *key;
+		NMConnection *connection = nma_wifi_dialog_get_connection (dialog, NULL, NULL);
+		NMConnection *orig = user_data;
+
+		g_print ("settings changed:\n");
+		nm_connection_diff (connection, orig, NM_SETTING_COMPARE_FLAG_EXACT, &diff);
+		if (!diff)
+			return;
+
+		g_hash_table_iter_init (&iter, diff);
+		while (g_hash_table_iter_next (&iter, (gpointer) &setting, (gpointer) &setting_diff)) {
+			g_hash_table_iter_init (&setting_iter, setting_diff);
+			while (g_hash_table_iter_next (&setting_iter, (gpointer) &key, NULL))
+				g_print (" %s.%s\n", setting, key);
+		}
+
+		g_hash_table_destroy (diff);
+	}
+}
 
 int
 main (int argc, char *argv[])
@@ -29,6 +60,7 @@ main (int argc, char *argv[])
 	NMAccessPoint *ap = NULL;
 	gboolean secrets_only = FALSE;
 	GError *error = NULL;
+	const char *hints[] = { NM_SETTING_802_1X_IDENTITY, NM_SETTING_802_1X_PASSWORD, NM_SETTING_802_1X_PRIVATE_KEY_PASSWORD, NULL };
 
 	gtk_init (&argc, &argv);
 
@@ -60,7 +92,15 @@ main (int argc, char *argv[])
 		return 1;
 	}
 
-	dialog = nma_wifi_dialog_new (client, connection, device, ap, secrets_only);
+	dialog = nma_wifi_dialog_new (client, nm_simple_connection_new_clone (connection), device, ap, secrets_only);
+	g_signal_connect (dialog, "response", G_CALLBACK (response_cb), connection);
 	gtk_dialog_run (GTK_DIALOG (dialog));
 	gtk_widget_destroy (dialog);
+
+	dialog = nma_wifi_dialog_new_for_secrets (client, nm_simple_connection_new_clone (connection), NM_SETTING_802_1X_SETTING_NAME, hints);
+	g_signal_connect (dialog, "response", G_CALLBACK (response_cb), connection);
+	gtk_dialog_run (GTK_DIALOG (dialog));
+	gtk_widget_destroy (dialog);
+
+	g_object_unref (connection);
 }
